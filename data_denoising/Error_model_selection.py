@@ -5,7 +5,10 @@ from mpl_toolkits.mplot3d import Axes3D
 from tqdm import tqdm
 from IPython.display import Image, display
 from IPython.core.debugger import Tracer
-
+from scipy.signal import convolve
+from scipy.interpolate import UnivariateSpline
+import importlib
+importlib.reload(surface_fitter)
 import pdb
 
 data_names = ['advection_diffusion']
@@ -29,10 +32,11 @@ for data_name in data_names:
             try:
                 
                 dataset = data_name+'_'+ind+'_'+model_name
-                print dataset
+                print (dataset)
 
                 # load data using surface fitter class
-                reload(surface_fitter)
+                import importlib
+                importlib.reload(surface_fitter)
                 from surface_fitter import SurfNN
                 nn = SurfNN(data_name+'_'+ind, None)
                 x_flat, y_flat, U_min, U_max, U_shape = nn.load_data()
