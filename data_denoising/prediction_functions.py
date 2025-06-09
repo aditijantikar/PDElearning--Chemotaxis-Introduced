@@ -4,6 +4,8 @@ from scipy.signal import convolve2d
 from numpy import unique as un
 from scipy.interpolate import splrep, splev, bisplrep, bisplev
 from spline_custom_functions import GLS_spline_train_val
+from importlib import reload
+import sys
 
 from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.pyplot as plt
@@ -18,7 +20,7 @@ folder.
 
 def predict_finite_differences(dataset, model_name=None):
     
-    print 'finite differences, '+dataset
+    print ('finite differences, '+dataset)
 
     # load data using SurfNN class
     reload(surface_fitter)
@@ -66,8 +68,8 @@ def predict_finite_differences(dataset, model_name=None):
     U_xx_pred[-1,:] = (U_x_pred[-1,:]-U_x_pred[-2,:])/dx
 
     # print time
-    print 'Elapsed time =', time.time() - t0, 'seconds.'
-    print ''
+    print ('Elapsed time =', time.time() - t0, 'seconds.')
+    print ('')
 
     # bring predictions back to original scale
     U_pred = U_max*U_pred + U_min # un-normalized prediction
@@ -96,7 +98,7 @@ are saved in the data folder.
 
 def predict_splines(dataset, model_name=None):
     
-    print 'univariate splines, '+dataset
+    print ('univariate splines, '+dataset)
 
     # load data using SurfNN class
     reload(surface_fitter)
@@ -372,8 +374,8 @@ def predict_splines(dataset, model_name=None):
     U_xx_pred[x_w:-x_w, t_w:-t_w] = U_xx_pred_int
 
     # print time
-    print 'Elapsed time =', time.time() - t0, 'seconds.'
-    print ''
+    print ('Elapsed time =', time.time() - t0, 'seconds.')
+    print ('')
 
     # bring predictions back to original scale
     U_pred = U_max*U_pred + U_min # un-normalized prediction
@@ -402,7 +404,7 @@ are saved in the data folder.
 
 def predict_bisplines(dataset, model_name=None):
     
-    print 'bivariate splines, '+dataset
+    print ('bivariate splines, '+dataset)
         
     # load data using SurfNN class
     reload(surface_fitter)
@@ -580,8 +582,8 @@ def predict_bisplines(dataset, model_name=None):
     U_xx_pred[x_w:-x_w, t_w:-t_w] = U_xx_pred_int
 
     # print time
-    print 'Elapsed time =', time.time() - t0, 'seconds.'
-    print ''
+    print ('Elapsed time =', time.time() - t0, 'seconds.')
+    print ('')
 
     # bring predictions back to original scale
     U_pred = U_max*U_pred + U_min # un-normalized prediction
@@ -611,7 +613,7 @@ are saved in the data folder.
 
 def predict_NCV_bisplines(dataset, model_name=None):
     
-    print 'bivariate NCV splines, '+dataset
+    print ('bivariate NCV splines, '+dataset)
         
     # load data using SurfNN class
     reload(surface_fitter)
@@ -880,8 +882,8 @@ def predict_NCV_bisplines(dataset, model_name=None):
     U_xx_pred[x_w:-x_w, t_w:-t_w] = U_xx_pred_int
 
     # print time
-    print 'Elapsed time =', time.time() - t0, 'seconds.'
-    print ''
+    print ('Elapsed time =', time.time() - t0, 'seconds.')
+    print ('')
 
     # bring predictions back to original scale
     U_pred = U_max*U_pred + U_min # un-normalized prediction
@@ -952,8 +954,8 @@ def predict_global_bisplines(dataset, model_name=None):
 
     tpts = len(np.unique(t))
     train_val_ind = np.random.permutation(tpts)
-    train_ind = np.sort(train_val_ind[:np.int(.9*tpts)])
-    val_ind = np.sort(train_val_ind[np.int(.9*tpts):])
+    train_ind = np.sort(train_val_ind[:int(.9*tpts)])
+    val_ind = np.sort(train_val_ind[int(.9*tpts):])
 
     #subsample into train-val split
     X_train = X[:,train_ind]
@@ -972,22 +974,31 @@ def predict_global_bisplines(dataset, model_name=None):
     GLS_list=[]
     tck_opt = []
 
+    GLS_error_best = np.inf
+    no_improvement_count = 0
+
+
     while s_convergence == False:
 
         s_list.append(s)
 
-        print "attempting GLS global splines for s= " + str(s)
+        print ("attempting GLS global splines for s= " + str(s))
+        sys.stdout.flush()
+        print("Error is", GLS_error_prev)
+        sys.stdout.flush()
+
+
 
         try:
             
             GLS_error,tck = GLS_spline_train_val(s,X_train,T_train,U_train,X_val,T_val,U_val,iterMax,x_order=3,t_order=3,gamma=1.0,thres=1e-4)
 
-            print "Error is " + str(GLS_error)
+            print ("Error is " + str(GLS_error))
 
         except:
             GLS_error = np.inf
         
-            print "Failed to run. s too large"
+            print ("Failed to run. s too large")
 
         #compare to current best value:
         if GLS_error < GLS_error_opt:
@@ -996,13 +1007,37 @@ def predict_global_bisplines(dataset, model_name=None):
             tck_opt = tck
             s_opt = s
             
+         # Early stopping logic based on no improvement
+        if GLS_error < GLS_error_best - 1e-4:
+            GLS_error_best = GLS_error
+            no_improvement_count = 0
+        else:
+            no_improvement_count += 1
+
+        # Overfitting check based on error increasing
+        if GLS_error > GLS_error_prev and np.sum(np.isfinite(s_list)) >= 3:
+            print("Stopping due to potential overfitting.")
+            s_convergence = True
+
+        # Stop if no improvement for 3 rounds
+        elif no_improvement_count >= 3:
+            print("Early stopping: no improvement in 3 consecutive steps.")
+            s_convergence = True
+
+        if np.isfinite(GLS_error):
+            GLS_error_prev = GLS_error
+
+        GLS_list.append(GLS_error)
+        s = s / 2.0   
             
-        if GLS_error > GLS_error_prev:
+        '''if GLS_error > GLS_error_prev:
             #if the GLS error increases, and we've done at least 3 finite 
             #s values, then we're beginning to overfit,
             # so time to stop decreasing s
             if np.sum(np.isfinite(s_list)) >= 3:
                 s_convergence = True
+        
+
         else:
             #if not, keep going
             pass
@@ -1013,12 +1048,12 @@ def predict_global_bisplines(dataset, model_name=None):
 
         GLS_list.append(GLS_error)
         s = s/2.0
-    
+    '''
 
     #s_opt now gives us an approximate area to sample from. 
     #Now let's perform a slightly more refined search
     s_opt_loc = s_list.index(s_opt)
-    print "now re-doing search in ["+str(s_list[s_opt_loc+1])+","+str(s_list[s_opt_loc-1])+"]"
+    print ("now re-doing search in ["+str(s_list[s_opt_loc+1])+","+str(s_list[s_opt_loc-1])+"]")
 
     #look one value below s_opt and one above s_opt
     #and re-do search for s
@@ -1029,7 +1064,7 @@ def predict_global_bisplines(dataset, model_name=None):
 
     for i,s in enumerate(s_final_vec):
 
-        print "attempting GLS global splines for s= " + str(s)
+        print ("attempting GLS global splines for s= " + str(s))
 
         GLS_error,tck = GLS_spline_train_val(s,X_train,T_train,U_train,X_val,T_val,U_val,iterMax,x_order=3,t_order=3,gamma=1.0,thres=1e-4)
         GLS_final_vec[i] = GLS_error
@@ -1042,7 +1077,7 @@ def predict_global_bisplines(dataset, model_name=None):
             s_opt = s
 
 
-    with open("data/"+dataset+"_result.txt",'wb') as f:
+    with open("data/"+dataset+"_result.txt",'w') as f:
         f.write("Global NCV splines completed for " + dataset + "at \n")
         f.write(time.strftime('%Y-%m-%dT%H:%M:%S', time.localtime())+ "\n")
         f.write("Global s search considered \n")
@@ -1089,7 +1124,7 @@ network. Approximations are saved in the data folder.
     
 def predict_neural_network(dataset, model_name):
     
-    print 'neural network, '+dataset
+    print ('neural network, '+dataset)
         
     reload(surface_fitter)
     from surface_fitter import SurfNN
@@ -1117,8 +1152,8 @@ def predict_neural_network(dataset, model_name):
     U_t_pred = surface_data['outputs'][0] # un-normalized prediction
 
     # print time
-    print 'Elapsed time =', time.time() - t0, 'seconds.'
-    print ''
+    print ('Elapsed time =', time.time() - t0, 'seconds.')
+    print ('')
 
     # store everything in dictionary
     surface_data = {}

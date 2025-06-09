@@ -1,4 +1,5 @@
 import time
+import tensorflow
 from surface_fitter import SurfNN
 from prediction_functions import *
 
@@ -26,7 +27,7 @@ make_NCV_bsp_data = 0 # make local NCV bispline predictions?
 make_global_bsp_data = 1 # make gloval NCV bispline predictions?
 
 # pick datasets
-datasets = ['advection_diffusion']#['advection_diffusion','fisher','fisher_nonlin'] 
+datasets = ['chemotaxis']#['advection_diffusion','fisher','fisher_nonlin' -- changed from advection diffusion to chemotaxis] 
 inds = ['00','01','05','10','25','50']
 
 # pick ANN model name
@@ -46,9 +47,9 @@ for dataset in datasets:
 
         data_name = dataset+'_'+ind
 
-        print ''
-        print data_name, model_name
-        print ''
+        print ('')
+        print (data_name, model_name)
+        print ('')
 
         # run options
         if train_ann == 1:
@@ -59,7 +60,7 @@ for dataset in datasets:
                         batch_size=batch_size,
                         early_stopper=early_stop,
                         new_model=new_model)
-            print 'Elapsed time =', time.time() - t0, 'seconds.'
+            print ('Elapsed time =', time.time() - t0, 'seconds.')
             
         if make_ann_data == 1:
             

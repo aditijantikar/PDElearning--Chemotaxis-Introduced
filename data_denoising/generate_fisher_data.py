@@ -4,7 +4,9 @@ from mpl_toolkits.mplot3d import Axes3D
 from scipy.io import loadmat
 
 # load solution data from .mat
-data=loadmat('data/fisher_groundtruth.mat')
+#data=loadmat('data/fisher_groundtruth.mat')
+data = loadmat('/Users/aditijantikar/Documents/GitHub/PDElearning--Chemotaxis-Introduced/data_denoising/data/fisher_groundtruth.mat')
+
 
 D=data['D']
 r=data['r']
@@ -105,4 +107,7 @@ data['t'] = t
 data['U'] = U_noise
 data['gamma'] = gamma
 np.save('data/fisher_50',data)
+
+print("U shape:", U.shape)
+print("Number of data points:", U.shape[0] * U.shape[1])
 
