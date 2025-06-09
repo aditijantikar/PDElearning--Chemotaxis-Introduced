@@ -1,7 +1,8 @@
 import numpy as np
-import keras.backend as K
+import os
 import tensorflow as tf
-from keras.layers import Lambda
+import tensorflow.keras.backend as K
+from tensorflow.keras.layers import Lambda
 
 '''
 activation functions
@@ -18,7 +19,7 @@ layers
 def softplus_layer(**kwargs):
     def layer(x):
         return softplus(x)
-    return Lambda(layer, **kwargs)
+    return Lambda(layer, output_shape=lambda s: s, **kwargs)
 
 '''
 loss functions

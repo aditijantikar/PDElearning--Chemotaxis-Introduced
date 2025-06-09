@@ -5,7 +5,7 @@ import matplotlib, os, math, sys
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from scipy.signal import convolve2d
-from IPython.core.debugger import Tracer
+#from IPython.core.debugger import Tracer
 from keras.layers import Input, Concatenate, Dense
 from keras.models import Model
 from keras.optimizers import Adam
@@ -14,14 +14,14 @@ import keras.backend as K
 import pdb
 # import custom activations and loss functions
 from custom_functions import *
-
+ 
 
 class SurfNN():
     
     def __init__(self, data_name, model_name):
         
         # data parameters
-        self.data_dir = 'data'
+        self.data_dir = 'data_denoising/data'
         self.data_name = data_name
         
         # network parameters
@@ -34,7 +34,8 @@ class SurfNN():
         # training parameters
         self.train_perc = 0.9
         self.loss = gls_thresh_loss
-        self.optimizer = Adam(lr=0.001, beta_1=0.9, beta_2=0.999)
+        self.optimizer = Adam(learning_rate=0.001, beta_1=0.9, beta_2=0.999)
+
         
         # plotting parameters
         self.plot_dir = 'plots'
@@ -74,15 +75,25 @@ class SurfNN():
         '''
         
         # import data file
-        data = np.load(self.data_dir+'/'+self.data_name+'.npy').item()
+        #data = np.load(self.data_dir+'/'+self.data_name+'.npy').item()
+        data = np.load(f"{self.data_dir}/{self.data_name}.npz")
+
         
         # load coordinate vectors (independent variables)
-        x = data['x']
+        '''x = data['x']
         t = data['t']
         x_coord_vecs = [x,t] # [space x time]
         
         # load scalar response surface (dependent variable)
         U = data['U'].T # [space x time]
+        '''
+        # load coordinate vectors (independent variables)
+        x = data['x']
+        t = data['t']
+        x_coord_vecs = [x, t]  # [space x time]
+        # load scalar response surface (dependent variable)
+        U = data['U_noisy'].T  # transpose to [space x time]
+        
         
         # compute extrema
         U_min = float(np.min(U))
@@ -99,12 +110,13 @@ class SurfNN():
         y_flat = U.reshape(-1)[:,np.newaxis] # [N x 1]
         
         # load analytic solutions
-        name = self.data_name[:-2]+'00.npy'
-        data = np.load(self.data_dir+'/'+name).item()
-        self.U_true = (data['U'].T - U_min)/U_max
-        self.U_t_true = data['U_t'].T/U_max
-        self.U_x_true = data['U_x'].T/U_max
-        self.U_xx_true = data['U_xx'].T/U_max
+        name = self.data_name[:-2] + '00.npz'
+        data = np.load(f"{self.data_dir}/{name}")
+
+        self.U_true = (data['U_noisy'].T - U_min)/U_max
+        self.U_t_true = data['U_t_noisy'].T/U_max
+        self.U_x_true = data['U_x_noisy'].T/U_max
+        self.U_xx_true = data['U_xx_noisy'].T/U_max
 
         return x_flat, y_flat, U_min, U_max, U.shape
         
@@ -239,9 +251,9 @@ class SurfNN():
             # if no improvement found for some time, stop training
             if epoch - last_improvement > early_stopper:
 
-                print ''
+                print ('')
                 print("No improvement found in a while, stopping training.")
-                print ''
+                print ('')
 
                 break
                 
@@ -251,7 +263,7 @@ class SurfNN():
             if math.isnan(evals_val) or math.isinf(evals_val):
                 sys.exit("Optimization failed, val cost = inf/nan.")
         
-        print ''
+        print ('')
     
     def saver(self):
         

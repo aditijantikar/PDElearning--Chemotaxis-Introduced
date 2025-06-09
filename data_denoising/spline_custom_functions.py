@@ -41,11 +41,11 @@ def GLS_spline_train_val(s,X_train,T_train,U_train,X_val,T_val,U_val,iterMax,x_o
 	        last_knots_equal = [knot_entry in np.arange(knot_count_list[-1]-1,knot_count_list[-1]+2) for knot_entry in knot_count_list[-5:]]
 	        if all(last_knots_equal):
 	            knot_convergence = True
-	            print "knot locations converged"
+	            print ("knot locations converged")
 
 	    #but don't let it run too long
 	    if knot_iter_count > iterMax:
-	        print "Exiting knot location convergence due to too many iterations"
+	        print ("Exiting knot location convergence due to too many iterations")
 	        break
 
 	#now that the knots have converged, let's find the spline coefficients
@@ -77,7 +77,7 @@ def GLS_spline_train_val(s,X_train,T_train,U_train,X_val,T_val,U_val,iterMax,x_o
 		param_tol_ind = np.abs(cOld) > 1e-1
 		param_tol_ratio = (cOld - tck[2])/cOld
 		if np.sum(param_tol_ind) == 0:
-			print "Exiting, as coeffs are converging to zero"
+			print ("Exiting, as coeffs are converging to zero")
 			break
 		else:
 			param_tol = np.linalg.norm(param_tol_ratio[param_tol_ind],np.inf)
@@ -85,7 +85,7 @@ def GLS_spline_train_val(s,X_train,T_train,U_train,X_val,T_val,U_val,iterMax,x_o
 		#if the weights don't change much, we have converged
 		if param_tol < 1e-2:
 
-			print "Spline parameters appear to have converged, now exiting"
+			print ("Spline parameters appear to have converged, now exiting")
 			converge_critera = True
 
 		#otherwise, keep going
@@ -97,7 +97,7 @@ def GLS_spline_train_val(s,X_train,T_train,U_train,X_val,T_val,U_val,iterMax,x_o
 
 		#if we exceed itermax, we can leave
 		if count >= iterMax:
-			print "Exiting due to exceeding iterMax"
+			print ("Exiting due to exceeding iterMax")
 			break
 
 
@@ -107,7 +107,7 @@ def GLS_spline_train_val(s,X_train,T_train,U_train,X_val,T_val,U_val,iterMax,x_o
 	#create weight matrix from U_pred
 	W_val = np.abs(U_pred_val.flatten()**gamma)
 	#Values below thres will have OLS model
-	W_val[np.abs(U_pred_val.flatten()<thres)] = 1.0
+	W_val[np.abs(U_pred_val.flatten()) < thres] = 1.0
 
 	#compute error
 	GLS_error = np.linalg.norm((U_pred_val - U_val).flatten()/W_val)
