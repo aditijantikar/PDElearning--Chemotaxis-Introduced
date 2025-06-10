@@ -1,0 +1,860 @@
+The following are the files used for "Robust Identification of Chemotaxis PDE Parameters
+from Noisy Spatiotemporal Data." Each section is separated by -----> followed by the file name.
+To run the code, please clone the repository and execute it locally, as several dependencies are required. This link for the repository is: https://github.com/aditijantikar/PDElearning--Chemotaxis-Introduced/tree/master
+
+Note: Some files(PINN and ANN-SINDy) are computationally intensive and may not run efficiently on a standard CPU. For those cases, running them on Google Colab is recommended.
+
+The order of running is: 1) generate_chemotaxis.py 2) generate_chemotaxis_derivatives.py 3) sindy_chemotaxis_model.py 4) pinn_chemotaxis.py 5) ann_denoiser.py
+
+-Aditi Jantikar and Pavithra Ramesh
+
+*******************************************************************************************
+-----> ANN- SINDy
+
+ann_denoiser.py
+
+# --- Imports ---
+import numpy as np
+import torch
+import torch.nn as nn
+import matplotlib.pyplot as plt
+import pandas as pd
+
+
+from pysindy import SINDy
+from pysindy.feature_library import IdentityLibrary
+from pysindy.optimizers import STLSQ
+from sklearn.preprocessing import StandardScaler
+
+# --- Chemotaxis Gradient Function ---
+def dS_dx(x_np):
+    return -((x_np - 0.7) / 0.01) * np.exp(-((x_np - 0.7)**2) / 0.02)
+
+# --- Define Denoiser ANN with Skip Connections, tanh, Dropout ---
+class DenoiserANN(nn.Module):
+    def __init__(self, dropout_p=0.1):
+        super().__init__()
+        self.fc1 = nn.Linear(2, 128)
+        self.fc2 = nn.Linear(128, 128)
+        self.dropout = nn.Dropout(p=dropout_p)
+        self.out = nn.Linear(128, 1)
+
+    def forward(self, x, t):
+        xt = torch.stack([x, t], dim=-1)
+        h1 = torch.tanh(self.fc1(xt))
+        h2 = torch.tanh(self.fc2(h1))
+        h2 = self.dropout(h2)
+        return self.out(h1 + h2).squeeze(-1)  # Skip connection
+
+# --- Train with Sobolev Regularization and Optional PDE Constraint ---
+def train_ann(model, x, t, u, epochs=500, lr=1e-3, λ=1e-4, use_pde_constraint=True):
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    D_nom, chi_nom = 0.01, 0.5
+
+    for epoch in range(epochs):
+        optimizer.zero_grad()
+        x.requires_grad_(True)
+        t.requires_grad_(True)
+
+        u_pred = model(x, t)
+        loss_mse = torch.mean((u_pred - u) ** 2)
+
+        ux = torch.autograd.grad(u_pred, x, grad_outputs=torch.ones_like(u_pred), create_graph=True)[0]
+        uxx = torch.autograd.grad(ux, x, grad_outputs=torch.ones_like(ux), create_graph=True)[0]
+        loss_smooth1 = torch.mean(ux ** 2)
+        loss_smooth2 = torch.mean(uxx ** 2)
+
+        loss = loss_mse + λ * (loss_smooth1 + loss_smooth2)
+
+        if use_pde_constraint:
+            ut = torch.autograd.grad(u_pred, t, grad_outputs=torch.ones_like(u_pred), create_graph=True)[0]
+            dS = torch.tensor(dS_dx(x.detach().numpy()), dtype=torch.float32)
+            u_dS = u_pred * dS
+            dx_u_dS = torch.autograd.grad(u_dS, x, grad_outputs=torch.ones_like(u_dS), create_graph=True)[0]
+            pde_residual = ut - D_nom * uxx + chi_nom * dx_u_dS
+            loss_pde = torch.mean(pde_residual ** 2)
+            loss += 0.1 * loss_pde  # Weight for PDE loss
+
+        loss.backward()
+        optimizer.step()
+
+        if epoch % 200 == 0:
+            print(f"[Epoch {epoch}] MSE: {loss_mse.item():.3e}, Smooth: {loss_smooth2.item():.3e}")
+
+    return model
+
+# --- Plotting ANN vs. noisy vs. clean ---
+def plot_u_comparison(model, x_grid, t_grid, U_noisy, U_clean):
+    model.train()  # Keep dropout on
+    X, T = np.meshgrid(x_grid, t_grid, indexing='ij')
+    xt = torch.tensor(np.stack([X.ravel(), T.ravel()], axis=-1), dtype=torch.float32)
+
+    with torch.no_grad():
+        samples = [model(xt[:, 0], xt[:, 1]).cpu().numpy().reshape(X.shape) for _ in range(20)]
+        U_ann_mean = np.mean(samples, axis=0)
+        U_ann_std = np.std(samples, axis=0)
+
+    plt.figure(figsize=(16, 4))
+    titles = ['Noisy $u(x,t)$', 'Denoised ANN $u_{ANN}(x,t)$', 'Clean $u_{clean}(x,t)$']
+    fields = [U_noisy, U_ann_mean, U_clean]
+
+    for i, field in enumerate(fields):
+        plt.subplot(1, 3, i + 1)
+        plt.imshow(field, extent=[t_grid[0], t_grid[-1], x_grid[0], x_grid[-1]],
+                   origin='lower', aspect='auto', cmap='viridis')
+        plt.colorbar()
+        plt.title(titles[i])
+        plt.xlabel("t")
+        plt.ylabel("x")
+
+    plt.tight_layout()
+    plt.show()
+
+# --- Run full pipeline for one dataset ---
+def run_pipeline(filename, D_true=0.01, chi_true=0.5):
+    data = np.load(filename)
+    U, x, t = data['U_noisy'], data['x'], data['t']
+    dt = t[1] - t[0]
+
+    crop = 10
+    U = U[crop:-crop, :]
+    x = x[crop:-crop]
+
+    X, T = np.meshgrid(x, t, indexing='ij')
+    x_flat = torch.tensor(X.ravel(), dtype=torch.float32)
+    t_flat = torch.tensor(T.ravel(), dtype=torch.float32)
+    u_noisy = torch.tensor(U.ravel(), dtype=torch.float32)
+
+    n = 10000
+    indices = torch.randperm(x_flat.shape[0])[:n]
+    x_flat = x_flat[indices]
+    t_flat = t_flat[indices]
+    u_noisy = u_noisy[indices]
+
+    model = DenoiserANN(dropout_p=0.1)
+    model = train_ann(model, x_flat, t_flat, u_noisy)
+    model.eval()
+
+    x_flat.requires_grad_(True)
+    t_flat.requires_grad_(True)
+
+    u_hat = model(x_flat, t_flat)
+    ut = torch.autograd.grad(u_hat, t_flat, grad_outputs=torch.ones_like(u_hat), create_graph=True)[0]
+    ux = torch.autograd.grad(u_hat, x_flat, grad_outputs=torch.ones_like(u_hat), create_graph=True)[0]
+    uxx = torch.autograd.grad(ux, x_flat, grad_outputs=torch.ones_like(ux), create_graph=True)[0]
+
+    dS = torch.tensor(dS_dx(x_flat.detach().numpy()), dtype=torch.float32)
+    u_dS = u_hat * dS
+    dx_u_dS = torch.autograd.grad(u_dS, x_flat, grad_outputs=torch.ones_like(u_dS), create_graph=True)[0]
+
+    Theta = torch.stack([uxx, -dx_u_dS], dim=1).detach().numpy()
+    Ut = ut.detach().numpy().reshape(-1, 1)
+
+    scaler = StandardScaler()
+    Theta_scaled = scaler.fit_transform(Theta)
+
+    sindy = SINDy(feature_library=IdentityLibrary(), optimizer=STLSQ(threshold=1e-3))
+    sindy.fit(Theta_scaled, x_dot=Ut, t=dt)
+    coeffs = sindy.coefficients().flatten()
+
+    stds = scaler.scale_
+    D_est, chi_est = coeffs[0] / stds[0], coeffs[1] / stds[1]
+
+    err_D = abs(D_est - D_true) / D_true * 100
+    err_chi = abs(chi_est - chi_true) / chi_true * 100
+
+    return D_est, chi_est, err_D, err_chi, sindy, model, x, t, U, data['U_clean']
+
+# --- Run Across Noise Levels ---
+sigmas = ['00', '01', '05', '10', '25', '50']
+results = []
+
+for s in sigmas:
+    print(f"\n--- Processing σ = 0.{s} ---")
+    file_path = f"/content/chemotaxis_{s}.npz"
+    try:
+        D, chi, err_D, err_chi, sindy_model, ann_model, x, t, U_noisy, U_clean = run_pipeline(file_path)
+        print("Recovered PDE:")
+        sindy_model.print()
+        results.append((f"0.{s}", D, chi, err_D, err_chi))
+
+        if s == '10':
+            plot_u_comparison(ann_model, x, t, U_noisy, U_clean)
+
+    except Exception as e:
+        print(f"Error processing σ = 0.{s}: {e}")
+
+# --- Tabulate and Plot Results ---
+df = pd.DataFrame(results, columns=['σ', 'D_ANN', 'χ_ANN', 'ε_D (%)', 'ε_χ (%)'])
+print("\n==== ANN-SINDy Results Across Noise Levels ====")
+print(df)
+
+df['σ_float'] = df['σ'].astype(float)
+plt.plot(df['σ_float'], df['ε_D (%)'], label='D error')
+plt.plot(df['σ_float'], df['ε_χ (%)'], label='χ error')
+plt.xlabel("Noise level σ")
+plt.ylabel("Relative Error (%)")
+plt.title("ANN-SINDy vs. Noise")
+plt.legend()
+plt.grid(True)
+plt.show()
+
+*******************************************************************************************
+
+
+-----> Generate Chemotaxis Derivatives
+
+# data_denoising/generate_chemotaxis_derivatives.py
+
+import numpy as np
+import os
+
+def generate_chemotaxis_data_with_derivatives(
+    filename="data_denoising/data/chemotaxis_00.npz",
+    D=0.01, chi=0.5, L=1.0, T=1.0, nx=199, nt=2000, sigma=0.0 # Increased nt for stability
+):
+    """
+    1) Simulating u(t,x) with chemotaxis PDE: u_{t} = D u_{xx} - chi * ∂x(u * S_x).
+       Uses a stable dt due to increased nt.
+    2) For sigma=0, define u_t for SINDy using the true D, chi and the exact
+       FD forms SINDy will use for its library. For sigma > 0, compute u_t via FD.
+    3) Add proportional noise to u itself, but compute all derivatives on
+       the *noisy* u. (Except u_t for sigma=0 as per point 2).
+    4) Save arrays: U_noisy, U_t_noisy, U_x_noisy, U_xx_noisy, U_ds_noisy, x, t.
+    """
+
+    dx = L / (nx - 1)
+    dt = T / (nt - 1) # dt is now smaller
+
+    print(f"Generating data for {filename} with D={D}, chi={chi}, sigma={sigma}")
+    print(f"Spatial step dx = {dx:.2e}, Temporal step dt = {dt:.2e}")
+    print(f"Stability check (D*dt/dx^2): {D*dt/(dx**2):.4f} (should be < 0.5 for simple diffusion)")
+
+
+    # full spatial grid, length = nx
+    x = np.linspace(0, L, nx)  
+     # full time grid, length = nt  
+    t = np.linspace(0, T, nt)   
+
+    # Simulate the PDE on the *raw* (u) grid:
+    u_simulated = np.zeros((nt, nx)) 
+    u_simulated[0, :] = 0.1 + 0.05 * np.exp(-((x - 0.3) ** 2) / 0.01)
+
+    S    = np.exp(-((x - 0.7) ** 2) / 0.02)
+    dSdx = np.gradient(S, dx) # dS/dx on the full x-grid
+
+    for n in range(nt - 1):
+        dudx_sim      = np.gradient(u_simulated[n, :], dx)
+        d2udx2_sim    = np.gradient(dudx_sim, dx)
+        chem_flux_sim = np.gradient(u_simulated[n, :] * dSdx, dx)
+        
+        u_simulated[n + 1, :] = u_simulated[n, :] + dt * (D * d2udx2_sim - chi * chem_flux_sim)
+
+    print(f"Simulation finished. Max u_simulated value: {np.max(u_simulated):.4f}, Min u_simulated value: {np.min(u_simulated):.4f}")
+
+    #  Add proportional Gaussian noise to *u_simulated* itself:
+    if sigma > 0:
+        noise = sigma * u_simulated * np.random.randn(*u_simulated.shape)
+        u_for_derivatives = u_simulated + noise 
+    else:
+        u_for_derivatives = u_simulated 
+
+    # Compute library terms for SINDy from u_for_derivatives
+    U_xx_candidate = np.gradient(np.gradient(u_for_derivatives, dx, axis=1), dx, axis=1)
+    U_ds_candidate = u_for_derivatives * dSdx
+    Partial_x_U_ds_candidate = np.gradient(U_ds_candidate, dx, axis=1)
+
+    # Define the target U_t for SINDy.
+    if sigma == 0:
+        U_t_defined_for_sindy = D * U_xx_candidate - chi * Partial_x_U_ds_candidate
+    else:
+        U_t_defined_for_sindy = np.gradient(u_for_derivatives, dt, axis=0)
+    # For saving U_x_noisy
+    U_x_for_sindy  = np.gradient(u_for_derivatives, dx, axis=1) 
+
+    # Crop boundaries to reduce dimensions from (nt, nx) to (nt-2, nx-2)
+    u_final_crop    = u_for_derivatives[1:-1, 1:-1]
+    u_t_final_crop  = U_t_defined_for_sindy[1:-1, 1:-1] 
+    u_x_final_crop  = U_x_for_sindy[1:-1, 1:-1]
+    u_xx_final_crop = U_xx_candidate[1:-1, 1:-1] 
+    uds_final_crop  = U_ds_candidate[1:-1, 1:-1] 
+
+    # Corresponds to nx-2 points
+    x_crop = x[1:-1] 
+    # Corresponds to nt-2 points
+    t_crop = t[1:-1] 
+
+    #  Save these six arrays in one .npz:
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+    np.savez(
+        filename,
+        U_noisy    = u_final_crop,       
+        U_t_noisy  = u_t_final_crop,     
+        U_x_noisy  = u_x_final_crop,     
+        U_xx_noisy = u_xx_final_crop,    
+        U_ds_noisy = uds_final_crop,     
+        x          = x_crop,
+        t          = t_crop
+    )
+    print(f"Saved to “{filename}” with U_noisy.shape = {u_final_crop.shape} (nt_cropped, nx_cropped)")
+    print(f"  Max U_noisy value in saved file: {np.max(u_final_crop):.4f}, Min: {np.min(u_final_crop):.4f}")
+
+
+if __name__ == "__main__":
+    true_D = 0.01
+    true_chi = 0.5
+    
+    # Set nt for the simulation 
+    simulation_nt = 2000 # Using the new stable value
+
+    noise_levels = ["00","01","05","10","25","50"]
+    
+    
+    for level in noise_levels:
+        sigma_val = float("0." + level) if level != "00" else 0.0
+        fn    = f"data_denoising/data/chemotaxis_{level}.npz" 
+        generate_chemotaxis_data_with_derivatives(
+            filename=fn,
+            D=true_D,      
+            chi=true_chi,  
+            nt=simulation_nt, # Pass the new nt
+            sigma=sigma_val
+        )
+        print("-" * 50)
+
+*******************************************************************************************
+
+------> Generate Chemotaxis
+
+generate_chemotaxis.py
+
+import numpy as np
+import os
+import matplotlib.pyplot as plt 
+
+def generate_chemotaxis_data(filename="data_denoising/data/chemotaxis_data.npz", 
+                              D=0.01, chi=0.5, L=1.0, T=1.0, nx=199, nt=99, sigma=0.1):
+    """
+    Simulate a chemotaxis PDE model and save noisy spatiotemporal data.
+
+    PDE: du/dt = D * d2u/dx2 - chi * d/dx (u * dS/dx)
+    """
+    dx = L / (nx - 1)
+    dt = T / (nt - 1)
+
+    x = np.linspace(0, L, nx)
+    t = np.linspace(0, T, nt)
+
+    # Initial condition: localized bump
+    u = np.zeros((nt, nx))
+    u[0, :] = 0.1 + 0.05 * np.exp(-((x - 0.3) ** 2) / 0.01)
+
+    # Static chemical signal S(x): Gaussian centered at 0.7
+    S = np.exp(-((x - 0.7) ** 2) / 0.02)
+    dSdx = np.gradient(S, dx)
+
+    # Time stepping using explicit finite differences
+    for n in range(0, nt - 1):
+        dudx = np.gradient(u[n, :], dx)
+        d2udx2 = np.gradient(dudx, dx)
+        chem_flux = np.gradient(u[n, :] * dSdx, dx)
+        u[n + 1, :] = u[n, :] + dt * (D * d2udx2 - chi * chem_flux)
+
+    # Normalize to [0, 1]
+    u_min, u_max = np.min(u), np.max(u)
+    u = (u - u_min) / (u_max - u_min)
+
+    # Add proportional Gaussian noise
+    noise = sigma * u * np.random.randn(*u.shape)
+    u_noisy = u + noise
+
+    # Save as .npz file
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+    np.savez(filename, u=u_noisy, x=x, t=t)
+
+    print(f"Chemotaxis data saved to {filename} with shape {u_noisy.shape}")
+
+if __name__ == "__main__":
+    noise_levels = ['00', '01', '05', '10', '25', '50']
+    for level in noise_levels:
+        sigma = float('0.' + level) if level != '00' else 0.0
+        filename = f"data_denoising/data/chemotaxis_{level}.npz"
+        generate_chemotaxis_data(filename=filename, sigma=sigma)
+
+data_00 = np.load("data_denoising/data/chemotaxis_00.npz")['u']
+data_50 = np.load("data_denoising/data/chemotaxis_50.npz")['u']
+
+plt.plot(data_00[-1], label='No noise (00)')
+plt.plot(data_50[-1], label='High noise (50)')
+plt.legend()
+plt.title("Final time step comparison")
+plt.xlabel("x index")
+plt.ylabel("u")
+plt.show()
+for level in ['00', '01', '05', '10', '25', '50']:
+    path = f"data_denoising/data/chemotaxis_{level}.npz"
+    data = np.load(path)['u']
+    print(f"chemotaxis_{level}.npz shape: {data.shape}, total points: {data.size}")
+
+*******************************************************************************************
+
+
+------> SINDy Chemotaxis 
+
+# data_denoising/sindy_chemotaxis_model.py
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt 
+
+from pysindy import SINDy
+from pysindy.feature_library import PolynomialLibrary, IdentityLibrary
+from pysindy.optimizers import STLSQ
+from sklearn.preprocessing import StandardScaler
+
+import subprocess
+
+#  Setup for experiments
+all_run_results = [] # Store results from all runs
+
+# Define noise levels to process
+noise_levels_to_process = ["00", "01", "05", "10", "25", "50"]
+
+# Define STLSQ thresholds to test for NOISY data
+experimental_thresholds_for_noisy = [1e-4, 5e-4, 1e-3, 5e-3, 1e-2, 2e-2, 5e-2, 1e-1]
+
+# Fixed threshold for the zero-noise case
+zero_noise_sindy_threshold = 1e-7
+
+# True D and Chi values for plotting reference
+D_true = 0.01
+chi_true = 0.5
+
+#  Looping over noise levels and SINDy thresholds
+
+for level in noise_levels_to_process:
+    fname = f"data_denoising/data/chemotaxis_{level}.npz"
+    data  = np.load(fname)
+    print(f"\nProcessing noise level: {float(level)/100:.2f}")
+
+    U_noisy    = data["U_noisy"]
+    U_t_noisy  = data["U_t_noisy"]
+    U_x_noisy  = data["U_x_noisy"] 
+    U_xx_noisy = data["U_xx_noisy"]
+    U_ds_noisy = data["U_ds_noisy"]
+    x_grid     = data["x"]
+    t_grid     = data["t"]
+
+    dt = t_grid[1] - t_grid[0]
+    dx = x_grid[1] - x_grid[0]
+
+    # --- PHASE 1---
+    run_phase_1 = True 
+    if run_phase_1:
+        u_flat   = U_noisy.ravel()
+        ut_flat  = U_t_noisy.ravel()
+        ux_flat  = U_x_noisy.ravel()
+        uxx_flat = U_xx_noisy.ravel()
+        uds_flat = U_ds_noisy.ravel()
+        Θ1        = np.vstack([u_flat, ux_flat, uxx_flat, uds_flat]).T
+        Θ1_scaled = StandardScaler().fit_transform(Θ1)
+        model1 = SINDy(
+            feature_library=PolynomialLibrary(degree=2),
+            optimizer=STLSQ(threshold=0.10)
+        )
+        model1.fit(Θ1_scaled, x_dot=ut_flat, t=dt)
+        print(f" Phase 1 (degree-2) at noise = {float(level)/100:.2f}")
+        model1.print()
+    # else:
+    #     print(f"Skipping Phase 1 for noise = {float(level)/100:.2f}")
+
+    # --- PHASE 2: Chemotaxis PDE ---
+    chem_flux = -np.gradient(U_ds_noisy, dx, axis=1)
+    ut_vec   = U_t_noisy.ravel()
+    uxx_vec  = U_xx_noisy.ravel()
+    flux_vec = chem_flux.ravel()
+    Θ2_raw = np.vstack([uxx_vec, flux_vec]).T
+
+    coefs_ls, _, _, _ = np.linalg.lstsq(Θ2_raw, ut_vec, rcond=None)
+    D_ls, chi_ls = coefs_ls[0], coefs_ls[1]
+    # print(f"Direct LS (no scaling) → D ≃ {D_ls:.6f}, χ ≃ {chi_ls:.6f}")
+
+    scaler2   = StandardScaler().fit(Θ2_raw)
+    Θ2_scaled = scaler2.transform(Θ2_raw)
+
+    thresholds_to_use_for_current_level = []
+    if level == "00":
+        thresholds_to_use_for_current_level = [zero_noise_sindy_threshold]
+    else:
+        thresholds_to_use_for_current_level = experimental_thresholds_for_noisy
+
+    for current_threshold in thresholds_to_use_for_current_level:
+        print(f"  Testing SINDy Phase 2 with threshold: {current_threshold:.1e}")
+        model2 = SINDy(
+            feature_library=IdentityLibrary(),
+            optimizer=STLSQ(threshold=current_threshold)
+        )
+        model2.fit(Θ2_scaled, x_dot=ut_vec)
+
+        coef_scaled = model2.coefficients().ravel()
+        D_sindy, chi_sindy = 0.0, 0.0
+
+        if len(coef_scaled) >= 1 and scaler2.scale_[0] != 0:
+            D_sindy = coef_scaled[0] / scaler2.scale_[0]
+        if len(coef_scaled) >= 2 and scaler2.scale_[1] != 0:
+            chi_sindy = coef_scaled[1] / scaler2.scale_[1]
+        
+        if len(coef_scaled) < 2 :
+             print(f"    Warning: SINDy returned {len(coef_scaled)} coefficients. Expected 2.")
+
+
+        all_run_results.append({
+            "noise_level_str": level, 
+            "noise":     float(level)/100,
+            "D_ls":      D_ls,
+            "chi_ls":    chi_ls,
+            "D_sindy":   D_sindy,
+            "chi_sindy": chi_sindy,
+            "sindy_threshold": current_threshold
+        })
+
+
+#  Display Results Table
+df_results = pd.DataFrame(all_run_results)
+print("\n----Full Results Table----")
+# Define columns to print to ensure order and inclusion of new column
+columns_to_print = ["noise", "sindy_threshold", "D_ls", "chi_ls", "D_sindy", "chi_sindy"]
+print(df_results.to_string(index=False, columns=[col for col in columns_to_print if col in df_results.columns]))
+
+print("\nGenerating plots.")
+
+# Plotting D_sindy vs. SINDy Threshold for each noise level
+plt.figure(figsize=(12, 7))
+unique_noisy_levels = sorted(df_results[df_results["noise"] > 0]["noise_level_str"].unique())
+
+for noise_str in unique_noisy_levels:
+    subset = df_results[df_results["noise_level_str"] == noise_str]
+    plt.plot(subset["sindy_threshold"], subset["D_sindy"], marker='o', linestyle='-', label=f'Noise {float(noise_str)/100:.2f}')
+
+plt.axhline(D_true, color='r', linestyle='--', label=f'True D = {D_true}')
+plt.xscale('log') 
+plt.xlabel("SINDy Threshold (STLSQ)")
+plt.ylabel("Discovered D_sindy")
+plt.title("Discovered D vs. SINDy Threshold for Different Noise Levels")
+plt.legend()
+plt.grid(True, which="both", ls="-", alpha=0.5)
+plt.tight_layout()
+plt.savefig("sindy_D_vs_threshold.png") 
+plt.show()
+
+# Plotting chi_sindy vs. SINDy Threshold for each noise level
+plt.figure(figsize=(12, 7))
+for noise_str in unique_noisy_levels:
+    subset = df_results[df_results["noise_level_str"] == noise_str]
+    plt.plot(subset["sindy_threshold"], subset["chi_sindy"], marker='o', linestyle='-', label=f'Noise {float(noise_str)/100:.2f}')
+
+plt.axhline(chi_true, color='r', linestyle='--', label=f'True chi = {chi_true}')
+plt.xscale('log') 
+plt.xlabel("SINDy Threshold (STLSQ)")
+plt.ylabel("Discovered chi_sindy")
+plt.title("Discovered chi vs. SINDy Threshold for Different Noise Levels")
+plt.legend()
+plt.grid(True, which="both", ls="-", alpha=0.5)
+plt.tight_layout()
+plt.savefig("sindy_chi_vs_threshold.png") # Save the plot
+plt.show()
+
+#  zero-noise case result 
+zero_noise_result = df_results[df_results["noise"] == 0]
+if not zero_noise_result.empty:
+    print("\n--- Zero Noise Result (for reference) ---")
+    print(zero_noise_result[["noise", "sindy_threshold", "D_sindy", "chi_sindy"]].to_string(index=False))
+
+print("\nDone with SINDy analysis and plotting for sindy_chemotaxis_model.py ")
+
+*******************************************************************************************
+
+-------> PINN
+
+import torch
+import torch.nn as nn
+import numpy as np
+import matplotlib.pyplot as plt
+import time
+import os
+from scipy.interpolate import griddata
+
+# --- Configuration ---
+D_val = 0.01
+chi_val = 0.5
+L_domain = 1.0
+T_domain = 1.0
+
+nn_hyperparams = {
+    'num_hidden_layers': 5,
+    'neurons_per_layer': 40
+}
+
+learning_rate = 1e-3
+num_epochs = 30000
+
+N_collocation = 20000
+N_initial = 500
+N_boundary = 500
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Using device: {device}")
+
+# --- Helper Functions ---
+def S_profile(x_tensor):
+    return torch.exp(-((x_tensor - 0.7)**2) / 0.02)
+
+def dSdx_profile(x_tensor):
+    return -(x_tensor - 0.7) / 0.01 * torch.exp(-((x_tensor - 0.7)**2) / 0.02)
+
+def initial_condition(x_tensor):
+    return 0.1 + 0.05 * torch.exp(-((x_tensor - 0.3)**2) / 0.01)
+
+# --- Neural Network ---
+class PINN_Net(nn.Module):
+    def __init__(self, num_hidden_layers=4, neurons_per_layer=50, input_dim=2, output_dim=1):
+        super(PINN_Net, self).__init__()
+        activation = nn.SiLU()
+        layers = [nn.Linear(input_dim, neurons_per_layer), activation]
+        for _ in range(num_hidden_layers - 1):
+            layers.append(nn.Linear(neurons_per_layer, neurons_per_layer))
+            layers.append(activation)
+        layers.append(nn.Linear(neurons_per_layer, output_dim))
+        self.model = nn.Sequential(*layers)
+        self.init_weights()
+
+    def forward(self, x_t_input):
+        return self.model(x_t_input)
+
+    def init_weights(self):
+        for m in self.model:
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_normal_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0.0)
+
+# --- Chemotaxis PINN ---
+class ChemotaxisPINN(nn.Module):
+    def __init__(self, L_domain, T_domain, nn_config):
+        super(ChemotaxisPINN, self).__init__()
+        self.D = nn.Parameter(torch.tensor(0.01, dtype=torch.float32, device=device))
+        self.chi = nn.Parameter(torch.tensor(0.5, dtype=torch.float32, device=device))
+
+        self.L = L_domain
+        self.T = T_domain
+
+        self.u_net = PINN_Net(
+            num_hidden_layers=nn_config['num_hidden_layers'],
+            neurons_per_layer=nn_config['neurons_per_layer']
+        ).to(device)
+
+        self.S_func = S_profile
+        self.dSdx_func = dSdx_profile
+        self.ic_func = initial_condition
+
+        self.loss_history = []
+        self.loss_pde_history = []
+        self.loss_ic_history = []
+        self.loss_bc_history = []
+
+    def compute_pde_residual(self, x, t):
+        u_val = self.u_net(torch.cat([x, t], dim=1))
+        u_t = torch.autograd.grad(u_val, t, grad_outputs=torch.ones_like(u_val), create_graph=True)[0]
+        u_x = torch.autograd.grad(u_val, x, grad_outputs=torch.ones_like(u_val), create_graph=True)[0]
+        u_xx = torch.autograd.grad(u_x, x, grad_outputs=torch.ones_like(u_x), create_graph=True)[0]
+        dSdx_val = self.dSdx_func(x)
+        V = u_val * dSdx_val
+        dVdx = torch.autograd.grad(V, x, grad_outputs=torch.ones_like(V), create_graph=True)[0]
+        return u_t - self.D * u_xx + self.chi * dVdx
+
+    def compute_ic_loss(self, x_ic, t_ic):
+        u_pred_ic = self.u_net(torch.cat([x_ic, t_ic], dim=1))
+        u_true_ic = self.ic_func(x_ic)
+        return torch.mean((u_pred_ic - u_true_ic)**2)
+
+    def compute_bc_loss(self, x_bc_left, x_bc_right, t_bc):
+        u_bc_left = self.u_net(torch.cat([x_bc_left, t_bc], dim=1))
+        du_dx_left = torch.autograd.grad(u_bc_left, x_bc_left, grad_outputs=torch.ones_like(u_bc_left), create_graph=True)[0]
+        loss_bc_left = torch.mean(du_dx_left**2)
+
+        u_bc_right = self.u_net(torch.cat([x_bc_right, t_bc], dim=1))
+        du_dx_right = torch.autograd.grad(u_bc_right, x_bc_right, grad_outputs=torch.ones_like(u_bc_right), create_graph=True)[0]
+        loss_bc_right = torch.mean(du_dx_right**2)
+        return loss_bc_left + loss_bc_right
+
+    def total_loss(self, x_col, t_col, x_ic, t_ic, x_bc_left, x_bc_right, t_bc, weights=None):
+        if weights is None:
+            weights = {'pde': 1.0, 'ic': 1.0, 'bc': 1.0}
+
+        loss_pde = torch.mean(self.compute_pde_residual(x_col, t_col)**2)
+        loss_ic = self.compute_ic_loss(x_ic, t_ic)
+        loss_bc = self.compute_bc_loss(x_bc_left, x_bc_right, t_bc)
+
+        total = weights['pde'] * loss_pde + weights['ic'] * loss_ic + weights['bc'] * loss_bc
+
+        if self.training:
+            self.loss_history.append(total.item())
+            self.loss_pde_history.append(loss_pde.item())
+            self.loss_ic_history.append(loss_ic.item())
+            self.loss_bc_history.append(loss_bc.item())
+        return total
+
+x_col = (torch.rand(N_collocation, 1, device=device) * L_domain).requires_grad_(True)
+t_col = (torch.rand(N_collocation, 1, device=device) * T_domain).requires_grad_(True)
+x_ic = torch.linspace(0, L_domain, N_initial, device=device).view(-1, 1)
+t_ic = torch.zeros_like(x_ic)
+t_bc = torch.linspace(0, T_domain, N_boundary, device=device).view(-1, 1)
+x_bc_left = torch.zeros_like(t_bc).requires_grad_(True)
+x_bc_right = torch.ones_like(t_bc).requires_grad_(True)
+
+pinn_model = ChemotaxisPINN(L_domain, T_domain, nn_hyperparams)
+optimizer = torch.optim.AdamW(
+    list(pinn_model.u_net.parameters()) + [pinn_model.D, pinn_model.chi],
+    lr=learning_rate
+)
+
+loss_weights = {'pde': 100.0, 'ic': 100.0, 'bc': 10.0}
+print(f"Using loss weights: {loss_weights}")
+print(f"Starting training for {num_epochs} epochs...")
+start_time = time.time()
+pinn_model.train()
+
+for epoch in range(num_epochs):
+    optimizer.zero_grad()
+    loss = pinn_model.total_loss(x_col, t_col, x_ic, t_ic, x_bc_left, x_bc_right, t_bc, weights=loss_weights)
+    loss.backward()
+    optimizer.step()
+
+    if (epoch + 1) % 1000 == 0:
+        print(f"Epoch [{epoch+1}/{num_epochs}], "
+              f"Total Weighted Loss: {loss.item():.4e}, "
+              f"PDE Loss (unweighted): {pinn_model.loss_pde_history[-1]:.4e}, "
+              f"IC Loss (unweighted): {pinn_model.loss_ic_history[-1]:.4e}, "
+              f"BC Loss (unweighted): {pinn_model.loss_bc_history[-1]:.4e}, "
+              f"D: {pinn_model.D.item():.5f}, chi: {pinn_model.chi.item():.5f}")
+
+end_time = time.time()
+print(f"Training finished in {end_time - start_time:.2f} seconds.")
+
+# --- Plotting Loss History ---
+plt.figure(figsize=(10, 6))
+plt.plot(pinn_model.loss_history, label='Total Loss')
+plt.plot(pinn_model.loss_pde_history, label='PDE Loss', alpha=0.7)
+plt.plot(pinn_model.loss_ic_history, label='IC Loss', alpha=0.7)
+plt.plot(pinn_model.loss_bc_history, label='BC Loss', alpha=0.7)
+plt.xlabel(f'Epoch (logged every {1 if num_epochs < 1000 else len(pinn_model.loss_history)//(num_epochs//1000)} steps)')
+plt.ylabel('Loss Value')
+plt.yscale('log')
+plt.title('Training Loss History')
+plt.legend()
+plt.grid(True)
+plt.savefig("pinn_forward_loss_history.png")
+plt.show()
+
+
+# After training, we compare the PINN solution u_NN(x,t) with the finite difference solution (clean).
+
+# Grid for plotting PINN solution
+nx_plot = 197 # To match nx_cropped from FD data
+nt_plot = 1998 # To match nt_cropped from FD data
+
+# Create 1D tensors for x and t for plotting
+x_plot_1d_torch = torch.linspace(0, L_domain, nx_plot, device=device)
+t_plot_1d_torch = torch.linspace(0, T_domain, nt_plot, device=device)
+
+# Create meshgrid for creating the input to the NN (for a full field prediction)
+X_plot_mesh, T_plot_mesh = torch.meshgrid(x_plot_1d_torch, t_plot_1d_torch, indexing='xy')
+x_flat_plot = X_plot_mesh.flatten().view(-1,1)
+t_flat_plot = T_plot_mesh.flatten().view(-1,1)
+
+# Get PINN predictions
+pinn_model.u_net.eval() # Set model to evaluation mode
+with torch.no_grad():
+    u_pinn_solution_flat = pinn_model.u_net(torch.cat([x_flat_plot, t_flat_plot], dim=1))
+
+# Reshape PINN solution to (nt_plot, nx_plot) for plotting with t on y-axis, x on x-axis
+# view(nx_plot, nt_plot) would make it u(x,t) if x is first dim of meshgrid then .T gives u(t,x)
+
+u_pinn_solution_grid = u_pinn_solution_flat.view(nx_plot, nt_plot).cpu().numpy() # Shape (nx_plot, nt_plot) -> u(x,t)
+u_pinn_for_plot = u_pinn_solution_grid.T # Shape (nt_plot, nx_plot) -> u(t,x)
+
+# Convert 1D plot grids to numpy for matplotlib
+x_plot_1d_np = x_plot_1d_torch.cpu().numpy()
+t_plot_1d_np = t_plot_1d_torch.cpu().numpy()
+
+plt.figure(figsize=(10,6))
+# For contourf(X,Y,Z), if X and Y are 1D, Z must be (len(Y), len(X))
+plt.contourf(x_plot_1d_np, t_plot_1d_np, u_pinn_for_plot, levels=50, cmap='viridis')
+plt.colorbar(label='u(x,t) PINN solution')
+plt.xlabel('Space x')
+plt.ylabel('Time t')
+plt.title('PINN Solution for Chemotaxis PDE (Forward Problem)')
+plt.savefig("pinn_forward_solution.png")
+plt.show()
+
+# START: Load Finite Difference (FD) solution and Compare
+
+# Since this has been computed on Google Colab, the file path here is temporary. To run it locally, change the path name 
+fd_data_path = "/content/chemotaxis_00.npz" 
+if os.path.exists(fd_data_path):
+    print(f"\nLoading Finite Difference solution from: {fd_data_path}")
+    data_fd = np.load(fd_data_path)
+    u_fd_clean_cropped = data_fd['U_noisy'] #clean solution (nt_cropped, nx_cropped)
+    x_fd_cropped_1d = data_fd['x']         #1D x_crop
+    t_fd_cropped_1d = data_fd['t']         # 1D t_crop
+
+    print(f"FD solution shape: {u_fd_clean_cropped.shape}")
+    print(f"FD x_crop shape: {x_fd_cropped_1d.shape}")
+    print(f"FD t_crop shape: {t_fd_cropped_1d.shape}")
+
+    # Points where FD data is known (original points for griddata)
+    X_fd_mesh_orig, T_fd_mesh_orig = np.meshgrid(x_fd_cropped_1d, t_fd_cropped_1d)
+    points_fd = np.vstack((X_fd_mesh_orig.ravel(), T_fd_mesh_orig.ravel())).T
+    # griddata expects (N, D) for points and (N,) for values. u_fd is (t,x) so .T gives (x,t) then ravel
+    values_fd = u_fd_clean_cropped.T.ravel() 
+    # Target grid for interpolation (from PINN plotting)- interpolate onto the grid defined by x_plot_1d_np and t_plot_1d_np
+    
+    X_target_mesh, T_target_mesh = np.meshgrid(x_plot_1d_np, t_plot_1d_np)
+
+    print(f"Interpolating FD data onto PINN plotting grid of shape ({nt_plot}, {nx_plot})")
+
+    u_fd_interpolated_flat = griddata(points_fd, values_fd,
+                                     (X_target_mesh.ravel(), T_target_mesh.ravel()),
+                                     method='cubic', fill_value=0.0)
+
+    # Reshape the interpolated FD data to (nt_plot, nx_plot)
+    u_fd_interpolated = u_fd_interpolated_flat.reshape(nt_plot, nx_plot)
+
+    # Plot interpolated FD solution
+    plt.figure(figsize=(10,6))
+    plt.contourf(x_plot_1d_np, t_plot_1d_np, u_fd_interpolated, levels=50, cmap='viridis')
+    plt.colorbar(label='u(x,t) FD solution (interpolated)')
+    plt.xlabel('Space x')
+    plt.ylabel('Time t')
+    plt.title('Finite Difference Solution (Ground Truth, Interpolated)')
+    plt.savefig("fd_solution_interpolated.png")
+    plt.show()
+
+    # Plot difference (u_pinn_for_plot is (nt,nx), u_fd_interpolated is (nt,nx))
+    difference_map = np.abs(u_pinn_for_plot - u_fd_interpolated)
+    plt.figure(figsize=(10,6))
+    plt.contourf(x_plot_1d_np, t_plot_1d_np, difference_map, levels=50, cmap='Reds')
+    plt.colorbar(label='|PINN - FD|')
+    plt.xlabel('Space x')
+    plt.ylabel('Time t')
+    plt.title('Absolute Difference between PINN and FD Solution')
+    plt.savefig("pinn_vs_fd_difference.png")
+    plt.show()
+
+    # Calculate Relative L2 error
+    l2_error = np.linalg.norm(u_pinn_for_plot - u_fd_interpolated) / np.linalg.norm(u_fd_interpolated)
+    print(f"Relative L2 error between PINN and FD solution: {l2_error:.4e}")
+else:
+    print(f"Skipping FD solution comparison: File not found at {fd_data_path}")
+
+# END: Load Finite Difference (FD) solution and Compare
