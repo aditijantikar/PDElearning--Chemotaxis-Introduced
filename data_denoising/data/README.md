@@ -15,14 +15,14 @@ You can view the detailed report here: [BENG_227_Project (1).pdf](https://github
 
 
 - To run the code , please clone the repository and execute it locally , as
-several d e p e n d e n c i e s are required .
+several dependencies are required .
 
-- Note : Some files ( PINN and ANN - SINDy ) are c o m p u t a t i o n a l l y intensive and
-may not run e f f i c i e n t l y on a standard CPU . For those cases , running
-them on Google Colab is r e c o m m e n d e d .
+- Note : Some files ( PINN and ANN - SINDy ) are computationally intensive and
+may not run efficiently on a standard CPU . For those cases , running
+them on Google Colab is recommended.
  
 - The order of running is : 1) g e n e r a t e _ c h e m o t a x i s . py 2)
 g e n e r a t e _ c h e m o t a x i s _ d e r i v a t i v e s . py 3) s i n d y _ c h e m o t a x i s _ m o d e l . py 4)
 p i n n _ c h e m o t a x i s . py 5) a n n _ d e n o i s e r . py
 
- - Aditi Jantikar and Pavithra Ramesh
+-- Aditi Jantikar and Pavithra Ramesh
