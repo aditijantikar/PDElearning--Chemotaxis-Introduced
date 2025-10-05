@@ -7,7 +7,7 @@ To run the code, please clone the repository and execute it locally, as several 
 Note: Some files (PINN and ANN - SINDy) are computationally intensive and may not run efficiently on a standard CPU. For those cases, running them on Google Colab is recommended.
 
 The chemotaxis.npz files can be found in the data_denoising/data folder.
-The other files are in the PDEFIND Folder
+The other files are in the data_denoising Folder
 
 The order of running is: 1) g e n e r a t e _ c h e m o t a x i s. py 2) g e n e r a t e _ c h e m o t a x i s _ d e r i v a t i v e s . py 3) s i n d y _ c h e m o t a x i s _ m o d e l . py 4) p i n n _ c h e m o t a x i s . py 5) a n n _ d e n o i s e r . py
 
